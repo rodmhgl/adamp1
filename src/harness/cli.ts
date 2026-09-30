@@ -11,15 +11,23 @@ import {
 } from './connection.js';
 import { createConsoleOperator } from './console-operator.js';
 import { openMidi, type PortNames } from './jzz-port.js';
-import { selectProbes, type Probe, type ProbeReport, type ProbeSelection } from './probe-runner.js';
+import {
+  DEFAULT_DUMP_TIMEOUT_MS,
+  selectProbes,
+  type Probe,
+  type ProbeReport,
+  type ProbeSelection,
+} from './probe-runner.js';
 import { connectivityProbe } from './probes/connectivity.js';
 import { documentedCommandsProbe } from './probes/documented-commands.js';
+import { memoryImageDumpProbe } from './probes/memory-image-dump.js';
 import { voicingMasterGainProbe } from './probes/voicing-master-gain.js';
 import { workingRegisterWriteProbe } from './probes/working-register-write.js';
 import { runSession } from './session.js';
 
 const PROBES: readonly Probe<unknown>[] = [
   connectivityProbe,
+  memoryImageDumpProbe,
   documentedCommandsProbe,
   workingRegisterWriteProbe,
   voicingMasterGainProbe,
@@ -34,15 +42,21 @@ const PRINT_DATA: Record<string, (data: unknown) => void> = {
   },
 };
 
+const DEFAULT_TIMEOUT_MS = 3000;
+
 const USAGE = `Usage: npm run harness -- [--probe <name> | --all] [--in <input port> --out <output port> --channel <1-16>]
-                           [--timeout <ms>] [--sessions-dir <folder>]
+                           [--timeout <ms>] [--dump-timeout <ms>] [--sessions-dir <folder>]
        npm run harness -- --list-ports
 
 Without --in/--out/--channel the harness asks for the ports and channel, offering last session's as defaults.
 Each session writes capture.log and report.json to a new folder under --sessions-dir (default harness-sessions).
+--timeout is the wait for each reply (default ${DEFAULT_TIMEOUT_MS} ms); --dump-timeout the wait for a Memory Image dump
+(default ${DEFAULT_DUMP_TIMEOUT_MS} ms).
 
 Probes:
   connectivity          (default) request the Working Register and print its eleven raw values
+  memory-image-dump     request the Memory Image, check and time it, and save it as memory-image-<n>.syx
+                        and a decoded memory-image-<n>.json: the session's backup
   documented-commands   send the manual's Get/Set Parameters (07/06) variants to the Working Register
                         (sets Master Gain in the Working Register to 0)
   working-register-write
@@ -50,9 +64,8 @@ Probes:
                         (restores the Program that was sounding afterwards)
   voicing-master-gain   set Master Gain, change Voicing over SysEx, and check whether Master Gain was reset to 0
                         (restores the Program that was sounding afterwards)
-  --all                 run every non-destructive probe (connectivity only: the others change the Working Register)`;
-
-const DEFAULT_TIMEOUT_MS = 3000;
+  --all                 run every non-destructive probe (connectivity and memory-image-dump:
+                        the others change the Working Register)`;
 
 async function main(): Promise<number> {
   const { values } = parseArgs({
@@ -61,6 +74,7 @@ async function main(): Promise<number> {
       out: { type: 'string' },
       channel: { type: 'string' },
       timeout: { type: 'string' },
+      'dump-timeout': { type: 'string' },
       probe: { type: 'string' },
       all: { type: 'boolean' },
       'sessions-dir': { type: 'string', default: 'harness-sessions' },
@@ -88,6 +102,11 @@ async function main(): Promise<number> {
   const timeoutMs = values.timeout === undefined ? DEFAULT_TIMEOUT_MS : Number(values.timeout);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     console.error(`--timeout must be a positive number of milliseconds, got "${values.timeout}".`);
+    return 2;
+  }
+  const dumpTimeoutMs = values['dump-timeout'] === undefined ? DEFAULT_DUMP_TIMEOUT_MS : Number(values['dump-timeout']);
+  if (!Number.isFinite(dumpTimeoutMs) || dumpTimeoutMs <= 0) {
+    console.error(`--dump-timeout must be a positive number of milliseconds, got "${values['dump-timeout']}".`);
     return 2;
   }
 
@@ -132,12 +151,16 @@ async function main(): Promise<number> {
           operator,
           connection,
           timeoutMs,
+          dumpTimeoutMs,
           probes,
           sessionDir,
           onProbeFinished: printReport,
         });
         console.log();
         console.log(`Session saved to ${sessionDir} (capture.log, report.json)`);
+        if (report.backup) {
+          console.log(`Memory Image backup: ${join(sessionDir, report.backup.syxFile)}`);
+        }
         return report.probes.every(({ verdict }) => verdict === 'confirmed') ? 0 : 1;
       } finally {
         await port.close();

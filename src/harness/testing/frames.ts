@@ -19,3 +19,13 @@ export function workingRegisterRequest(wireChannel: number): number[] {
 export function workingRegisterProgram(wireChannel: number, values: readonly number[]): number[] {
   return frame(wireChannel, 0x09, [0x7f, ...values]);
 }
+
+/** Command 0A: request the Memory Image. */
+export function memoryImageRequest(wireChannel: number): number[] {
+  return frame(wireChannel, 0x0a, []);
+}
+
+/** Command 0B: the Memory Image, 128 Programs of 11 values in Memory order, sent either way. */
+export function memoryImage(wireChannel: number, programs: readonly (readonly number[])[]): number[] {
+  return frame(wireChannel, 0x0b, programs.flat());
+}

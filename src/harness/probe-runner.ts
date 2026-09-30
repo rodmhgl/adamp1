@@ -1,3 +1,4 @@
+import type { MemoryImage } from '../core/memory-image.js';
 import type { MidiMessage, MidiPort } from '../core/midi-port.js';
 
 export type Verdict = 'confirmed' | 'refuted' | 'inconclusive';
@@ -40,18 +41,44 @@ export interface SessionSettings {
   channel: number;
   /** How long to wait for each reply. */
   timeoutMs: number;
+  /** How long to wait for a Memory Image dump. Defaults to `DEFAULT_DUMP_TIMEOUT_MS`. */
+  dumpTimeoutMs?: number;
+  /** Saves a verified Memory Image as the session's backup. Without it, saving a backup throws. */
+  saveBackup?(received: ReceivedMemoryImage): SavedBackup;
+}
+
+/** The full dump reportedly takes several seconds, so its default wait is far longer than a reply's. */
+export const DEFAULT_DUMP_TIMEOUT_MS = 15_000;
+
+/** A Memory Image read from the unit, with its 0B frame exactly as received. */
+export interface ReceivedMemoryImage {
+  image: MemoryImage;
+  syx: Uint8Array;
+}
+
+/** Where a backup was saved, relative to the session folder. */
+export interface SavedBackup {
+  syxFile: string;
+  decodedFile: string;
 }
 
 export interface ProbeContext {
   /** 0-based channel, as on the wire. */
   wireChannel: number;
   timeoutMs: number;
+  dumpTimeoutMs: number;
   /**
    * Sends `request` and resolves with the first received message that `accept`
-   * matches, or `undefined` when none arrives within the timeout.
+   * matches, or `undefined` when none arrives within `timeoutMs` (default: the session's).
    * An exact echo of the request, which some interfaces loop back, is never a match.
    */
-  request(request: Uint8Array, accept: (bytes: Uint8Array) => boolean): Promise<MidiMessage | undefined>;
+  request(
+    request: Uint8Array,
+    accept: (bytes: Uint8Array) => boolean,
+    timeoutMs?: number,
+  ): Promise<MidiMessage | undefined>;
+  /** Saves a Memory Image the probe has verified to disk as the session's backup. */
+  saveBackup(received: ReceivedMemoryImage): SavedBackup;
 }
 
 /** A single probe by name, or every probe that declares itself non-destructive, in registry order. */
@@ -75,9 +102,10 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
   const context: ProbeContext = {
     wireChannel: settings.channel - 1,
     timeoutMs: settings.timeoutMs,
-    request: (request, accept) => {
+    dumpTimeoutMs: settings.dumpTimeoutMs ?? DEFAULT_DUMP_TIMEOUT_MS,
+    request: (request, accept, timeoutMs = settings.timeoutMs) => {
       return new Promise((resolve) => {
-        const timer = setTimeout(() => finish(undefined), settings.timeoutMs);
+        const timer = setTimeout(() => finish(undefined), timeoutMs);
         const stopListening = settings.port.onMessage((message) => {
           if (!sameBytes(message.bytes, request) && accept(message.bytes)) finish(message);
         });
@@ -89,6 +117,10 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
         traffic.push({ direction: 'sent', bytes: [...request], timestamp: performance.now() });
         settings.port.send(request);
       });
+    },
+    saveBackup: (received) => {
+      if (!settings.saveBackup) throw new Error('This run has no session folder to save a backup to.');
+      return settings.saveBackup(received);
     },
   };
 

@@ -3,10 +3,12 @@ import { hexBytes } from '../core/sysex.js';
 import type { Connection } from './connection.js';
 import type { Operator } from './operator.js';
 import {
+  DEFAULT_DUMP_TIMEOUT_MS,
   runProbe,
   type Probe,
   type ProbeKind,
   type ProbeReport,
+  type SavedBackup,
   type TrafficEntry,
   type Verdict,
 } from './probe-runner.js';
@@ -18,6 +20,8 @@ export interface SessionOptions {
   connection: Connection;
   /** How long each probe waits for each reply. */
   timeoutMs: number;
+  /** How long to wait for a Memory Image dump. Defaults to `DEFAULT_DUMP_TIMEOUT_MS`. */
+  dumpTimeoutMs?: number;
   probes: readonly Probe<unknown>[];
   /** Folder for this session's capture log and report. */
   sessionDir: string;
@@ -33,7 +37,16 @@ export interface SessionReport {
   firmware: Firmware;
   connection: Connection;
   timeoutMs: number;
+  dumpTimeoutMs: number;
+  /** The latest verified Memory Image saved this session. Probes that write Memories need one. */
+  backup?: SessionBackup;
   probes: SessionProbeReport[];
+}
+
+export interface SessionBackup extends SavedBackup {
+  /** The probe that took it. */
+  probe: string;
+  savedAt: string;
 }
 
 export interface Firmware {
@@ -68,12 +81,14 @@ const FIRMWARE_QUESTION =
  */
 export async function runSession(options: SessionOptions): Promise<SessionReport> {
   const { port, operator, connection, timeoutMs, probes, sessionDir } = options;
+  const dumpTimeoutMs = options.dumpTimeoutMs ?? DEFAULT_DUMP_TIMEOUT_MS;
   const recorder = new SessionRecorder(sessionDir);
   const report: SessionReport = {
     startedAt: new Date().toISOString(),
     firmware: readFirmware(await operator.ask(FIRMWARE_QUESTION)),
     connection,
     timeoutMs,
+    dumpTimeoutMs,
     probes: [],
   };
   if (report.firmware.warning) operator.warn(report.firmware.warning);
@@ -91,7 +106,17 @@ export async function runSession(options: SessionOptions): Promise<SessionReport
   try {
     for (const probe of probes) {
       recorder.heading(`probe ${probe.name} (${probe.kind})`);
-      const probeReport = await runProbe(probe, { port: recordedPort, channel: connection.channel, timeoutMs });
+      const probeReport = await runProbe(probe, {
+        port: recordedPort,
+        channel: connection.channel,
+        timeoutMs,
+        dumpTimeoutMs,
+        saveBackup(received) {
+          const saved = recorder.saveMemoryImage(received);
+          report.backup = { probe: probe.name, savedAt: new Date().toISOString(), ...saved };
+          return saved;
+        },
+      });
       report.probes.push(toSessionProbeReport(probe.kind, probeReport));
       recorder.writeReport(report);
       options.onProbeFinished?.(probeReport);

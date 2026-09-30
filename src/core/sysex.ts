@@ -8,8 +8,8 @@
  * up to the last payload byte.
  */
 
-const SYSEX_START = 0xf0;
-const SYSEX_END = 0xf7;
+export const SYSEX_START = 0xf0;
+export const SYSEX_END = 0xf7;
 export const ADA_MANUFACTURER_ID = 0x0d;
 /** Constant byte seen after the command in every known frame. Its meaning is unknown. */
 const FIXED_BYTE = 0x01;
@@ -49,6 +49,11 @@ export function buildFrame({ channel, command, payload }: Frame): Uint8Array {
 
 export function isSysEx(bytes: ArrayLike<number>): boolean {
   return bytes.length > 0 && bytes[0] === SYSEX_START;
+}
+
+/** SysEx carrying ADA's manufacturer ID, whatever its layout. */
+export function isAdaSysEx(bytes: ArrayLike<number>): boolean {
+  return isSysEx(bytes) && bytes[1] === ADA_MANUFACTURER_ID;
 }
 
 export function parseFrame(bytes: ArrayLike<number>): ParsedFrame {
