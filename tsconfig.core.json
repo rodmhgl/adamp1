@@ -1,0 +1,9 @@
+{
+  "//": "The core is shared with the PWA (ADR 0001): no Node or DOM types allowed here.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": []
+  },
+  "include": ["src/core"],
+  "exclude": ["src/core/**/*.test.ts"]
+}

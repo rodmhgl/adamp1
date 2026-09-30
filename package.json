@@ -1,0 +1,26 @@
+{
+  "name": "adamp1",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Free, open-source editor and librarian for the ADA MP-1 MIDI Programmable Tube Preamp",
+  "license": "GPL-3.0-or-later",
+  "author": "Rod Stewart",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "harness": "tsx src/harness/cli.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.core.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "jzz": "^1.9.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.11"
+  }
+}
