@@ -1,7 +1,7 @@
 /**
  * Working Register messages. Hypotheses (ADR 0002): command 08 requests the
  * Working Register; the unit replies with command 09 carrying address 7F
- * followed by one Program.
+ * followed by one Program. The same 09 frame sent to the unit sets the Working Register.
  */
 import { parseProgram, type Program } from './program.js';
 import { buildFrame, hex, parseFrame } from './sysex.js';
@@ -17,6 +17,11 @@ export type WorkingRegisterReply =
 /** `channel` is 0-based, as on the wire. */
 export function workingRegisterRequest(channel: number): Uint8Array {
   return buildFrame({ channel, command: REQUEST_WORKING_REGISTER, payload: [] });
+}
+
+/** Sets the Working Register to `program`. `channel` is 0-based, as on the wire. */
+export function workingRegisterWrite(channel: number, program: Program): Uint8Array {
+  return buildFrame({ channel, command: PROGRAM_DATA, payload: [WORKING_REGISTER_ADDRESS, ...program.raw] });
 }
 
 export function parseWorkingRegisterReply(bytes: ArrayLike<number>): WorkingRegisterReply {

@@ -14,9 +14,16 @@ import { openMidi, type PortNames } from './jzz-port.js';
 import { selectProbes, type Probe, type ProbeReport, type ProbeSelection } from './probe-runner.js';
 import { connectivityProbe } from './probes/connectivity.js';
 import { documentedCommandsProbe } from './probes/documented-commands.js';
+import { voicingMasterGainProbe } from './probes/voicing-master-gain.js';
+import { workingRegisterWriteProbe } from './probes/working-register-write.js';
 import { runSession } from './session.js';
 
-const PROBES: readonly Probe<unknown>[] = [connectivityProbe, documentedCommandsProbe];
+const PROBES: readonly Probe<unknown>[] = [
+  connectivityProbe,
+  documentedCommandsProbe,
+  workingRegisterWriteProbe,
+  voicingMasterGainProbe,
+];
 
 /** Extra console output for probes whose data is worth showing beyond the findings. */
 const PRINT_DATA: Record<string, (data: unknown) => void> = {
@@ -38,7 +45,12 @@ Probes:
   connectivity          (default) request the Working Register and print its eleven raw values
   documented-commands   send the manual's Get/Set Parameters (07/06) variants to the Working Register
                         (sets Master Gain in the Working Register to 0)
-  --all                 run every non-destructive probe (connectivity; not documented-commands)`;
+  working-register-write
+                        write a known Program to the Working Register and read it back
+                        (restores the Program that was sounding afterwards)
+  voicing-master-gain   set Master Gain, change Voicing over SysEx, and check whether Master Gain was reset to 0
+                        (restores the Program that was sounding afterwards)
+  --all                 run every non-destructive probe (connectivity only: the others change the Working Register)`;
 
 const DEFAULT_TIMEOUT_MS = 3000;
 
