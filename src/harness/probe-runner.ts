@@ -3,10 +3,11 @@ import type { MidiMessage, MidiPort } from '../core/midi-port.js';
 export type Verdict = 'confirmed' | 'refuted' | 'inconclusive';
 
 /**
- * What a probe does: leaves the unit's Memories alone, writes them, or needs the
- * maintainer at the front panel. Only non-destructive probes run in "all non-destructive".
+ * What a probe does: leaves the unit as it was, changes the Working Register (the
+ * sounding Program), writes Memories, or needs the maintainer at the front panel.
+ * Only non-destructive probes run in "all non-destructive".
  */
-export type ProbeKind = 'non-destructive' | 'writes-memories' | 'guided';
+export type ProbeKind = 'non-destructive' | 'writes-working-register' | 'writes-memories' | 'guided';
 
 export interface Probe<T> {
   name: string;

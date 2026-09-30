@@ -22,7 +22,7 @@ npm run harness -- [--probe <name> | --all] [--in "<input port>" --out "<output 
 
 Without `--in`, `--out` and `--channel`, the harness lists the ports and asks for them and the channel. It remembers the choice and offers it as the default next time. Each session starts by asking for the firmware version from the power-up display, and warns if it isn't v2.x.
 
-The default probe, `connectivity`, requests the Working Register and prints the eleven raw parameter values, or explains why no valid reply arrived. `--probe documented-commands` sends the manual's Get/Set Parameters (07/06) messages to the Working Register and records any reply. It sets Master Gain in the Working Register to 0; recall the program to restore it. `--all` runs every non-destructive probe. `npm run harness -- --help` lists the probes.
+The default probe, `connectivity`, requests the Working Register and prints the eleven raw parameter values, or explains why no valid reply arrived. `--probe documented-commands` sends the manual's Get/Set Parameters (07/06) messages to the Working Register and records any reply. It sets Master Gain in the Working Register to 0; recall the program to restore it. `--all` runs only the probes that leave the unit as it was, so it skips `documented-commands`. `npm run harness -- --help` lists the probes.
 
 Each session writes to a new folder under `harness-sessions/` (ignored by git): `capture.log` has every MIDI message sent and received, timestamped, byte by byte, and `report.json` has the firmware version and each probe's verdict and evidence.
 

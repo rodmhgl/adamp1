@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { runProbe } from '../probe-runner.js';
+import { runProbe, selectProbes } from '../probe-runner.js';
 import { ScriptedPort } from '../testing/scripted-port.js';
 import { documentedCommandsProbe } from './documented-commands.js';
 
@@ -32,8 +32,9 @@ const ALL_VARIANTS = [
 ];
 
 describe("probe of the manual's documented commands", () => {
-  it('is non-destructive', () => {
-    expect(documentedCommandsProbe.kind).toBe('non-destructive');
+  it('declares that it changes the Working Register, so "all non-destructive" leaves it out', () => {
+    expect(documentedCommandsProbe.kind).toBe('writes-working-register');
+    expect(selectProbes([documentedCommandsProbe], { allNonDestructive: true })).toEqual([]);
   });
 
   it('sends every variant to the Working Register and reports a silent unit as inconclusive', async () => {

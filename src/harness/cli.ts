@@ -38,7 +38,7 @@ Probes:
   connectivity          (default) request the Working Register and print its eleven raw values
   documented-commands   send the manual's Get/Set Parameters (07/06) variants to the Working Register
                         (sets Master Gain in the Working Register to 0)
-  --all                 run every non-destructive probe`;
+  --all                 run every non-destructive probe (connectivity; not documented-commands)`;
 
 const DEFAULT_TIMEOUT_MS = 3000;
 

@@ -35,7 +35,7 @@ export interface DocumentedCommandVariant {
 
 export const documentedCommandsProbe: Probe<DocumentedCommandVariant[]> = {
   name: 'documented-commands',
-  kind: 'non-destructive',
+  kind: 'writes-working-register',
   async run({ wireChannel, timeoutMs, request }) {
     const variants: DocumentedCommandVariant[] = [];
     for (const { name, command, body } of MESSAGES) {
