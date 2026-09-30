@@ -12,7 +12,7 @@ export function restoreProbe(file: string, image: MemoryImage): Probe<SavedBacku
     name: 'restore',
     kind: 'writes-memories',
     async run({ loadMemoryImage, readMemoryImage, saveBackup }) {
-      const findings = await loadMemoryImage(image);
+      const { findings } = await loadMemoryImage(image);
       findings.push(`Loaded ${file}.`);
 
       const read = await readMemoryImage();

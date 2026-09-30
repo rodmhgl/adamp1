@@ -1,4 +1,4 @@
-import { MEMORY_COUNT, memoryImageDifferences, type MemoryDifference, type MemoryImage } from '../../core/memory-image.js';
+import { MEMORY_COUNT, memoryImageDifferences, rotatedByOne, type MemoryDifference } from '../../core/memory-image.js';
 import { describeFailedRead, describeMemoryDifferences } from '../memory-image-transfer.js';
 import type { Probe } from '../probe-runner.js';
 
@@ -20,7 +20,7 @@ export const memoryImageLoadProbe: Probe<MemoryImageLoadResult> = {
   kind: 'writes-memories',
   async run({ backup, loadMemoryImage, readMemoryImage }) {
     const saved = backup()!;
-    const testImage = rotated(saved.image);
+    const testImage = rotatedByOne(saved.image);
     const changedMemories = memoryImageDifferences(saved.image, testImage).length;
     if (changedMemories === 0) {
       return {
@@ -30,7 +30,7 @@ export const memoryImageLoadProbe: Probe<MemoryImageLoadResult> = {
       };
     }
 
-    const findings = await loadMemoryImage(testImage);
+    const { findings } = await loadMemoryImage(testImage);
     findings.push(`Loaded the backup ${saved.syxFile} with its Memories rotated by one, changing ${changedMemories} of ${MEMORY_COUNT} Memories.`);
 
     const read = await readMemoryImage();
@@ -68,7 +68,3 @@ export const memoryImageLoadProbe: Probe<MemoryImageLoadResult> = {
     };
   },
 };
-
-function rotated(image: MemoryImage): MemoryImage {
-  return { programs: [...image.programs.slice(1), image.programs[0]!] };
-}

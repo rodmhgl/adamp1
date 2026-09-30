@@ -54,9 +54,12 @@ export function describeFailedRead(read: Exclude<MemoryImageRead, { ok: true }>)
   return `Received ${read.bytes} bytes after ${read.durationMs} ms: ${read.detail}.`;
 }
 
-/** One line per parameter that read back differently after a load, for evidence. */
-export function describeMemoryDifferences(differences: readonly MemoryDifference[]): string[] {
+/**
+ * One line per parameter that read back differently, for evidence. `expected` names what
+ * it was compared against: by default the Memory Image loaded.
+ */
+export function describeMemoryDifferences(differences: readonly MemoryDifference[], expected = 'loaded'): string[] {
   return differences.flatMap(({ memory, differences }) =>
-    differences.map(({ name, wrote, readBack }) => `Memory ${memory}: ${name} loaded ${wrote}, read back ${readBack}.`),
+    differences.map(({ name, wrote, readBack }) => `Memory ${memory}: ${name} ${expected} ${wrote}, read back ${readBack}.`),
   );
 }

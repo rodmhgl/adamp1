@@ -79,6 +79,23 @@ export interface VerifiedBackup extends SavedBackup {
 export const PROTECT_OFF_INSTRUCTION =
   'Set Protect OFF so the unit accepts the Memory Image: on the front panel, press Store, then Bank+8.';
 
+export const PROTECT_ON_INSTRUCTION =
+  'Set Protect ON so the unit should refuse the Memory Image: on the front panel, press Store, then Bank+8. ' +
+  'The same keys turn Protect OFF again, so check the display shows Protect ON.';
+
+export interface MemoryImageLoadOptions {
+  /** Asks for Protect ON instead of OFF, for a load the unit should refuse. The restore afterwards asks for Protect OFF. */
+  protectOn?: boolean;
+}
+
+/** What came back from a Memory Image load. */
+export interface MemoryImageLoadAnswer {
+  /** The first ADA SysEx the unit sent within the reply timeout, if any. */
+  reply?: MidiMessage;
+  /** The reply as evidence, if any. */
+  findings: string[];
+}
+
 export interface ProbeContext {
   /** 0-based channel, as on the wire. */
   wireChannel: number;
@@ -108,12 +125,12 @@ export interface ProbeContext {
   saveBackup(received: ReceivedMemoryImage): SavedBackup;
   /**
    * The only way to write Memories. Asks the maintainer to confirm, showing how many
-   * Memories change against the backup, then to set Protect OFF, then sends `image`
-   * as a Memory Image load (command 0B) and waits the reply timeout for any answer,
-   * which it returns as findings. Throws `MemoryWriteRefused`, having sent nothing,
-   * when the session has no verified backup or the maintainer declines.
+   * Memories change against the backup, then to set Protect OFF (or ON, with `protectOn`),
+   * then sends `image` as a Memory Image load (command 0B) and waits the reply timeout
+   * for any answer. Throws `MemoryWriteRefused`, having sent nothing, when the session
+   * has no verified backup or the maintainer declines.
    */
-  loadMemoryImage(image: MemoryImage): Promise<string[]>;
+  loadMemoryImage(image: MemoryImage, options?: MemoryImageLoadOptions): Promise<MemoryImageLoadAnswer>;
 }
 
 /** A write to Memories that was never sent. */
@@ -168,6 +185,8 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
   const backup = () => settings.backup?.();
   /** False from the moment a Memory write is sent until a dump shows the unit holds the backup again. */
   let unitHoldsBackup = true;
+  /** Set once the maintainer was asked for Protect ON, so the restore asks for Protect OFF first. */
+  let protectMayBeOn = false;
 
   function exchange(
     request: Uint8Array,
@@ -235,7 +254,7 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
       unitHoldsBackup = true;
       return saved;
     },
-    async loadMemoryImage(image) {
+    async loadMemoryImage(image, { protectOn = false } = {}) {
       const saved = backup();
       if (!saved) throw noBackup();
       const changes = memoryImageDifferences(saved.image, image).length;
@@ -245,19 +264,36 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
       );
       if (settings.signal?.aborted) throw new ProbeStopped();
       if (!confirmed) throw new MemoryWriteRefused('The maintainer declined the Memory Image load, so nothing was written.');
-      await operator.instruct(PROTECT_OFF_INSTRUCTION);
+      if (protectOn) protectMayBeOn = true;
+      await operator.instruct(protectOn ? PROTECT_ON_INSTRUCTION : PROTECT_OFF_INSTRUCTION);
 
       // Checked here so a stop during the prompt sends nothing: `exchange` sends synchronously from here on.
       if (settings.signal?.aborted) throw new ProbeStopped();
       unitHoldsBackup = false;
       const reply = await exchange(memoryImageSyx(wireChannel, image), isAdaSysEx, settings.timeoutMs, settings.signal);
-      return reply ? [`The unit answered the Memory Image load with ${hexBytes(reply.bytes)}.`] : [];
+      return reply ? { reply, findings: [`The unit answered the Memory Image load with ${hexBytes(reply.bytes)}.`] } : { findings: [] };
     },
   };
 
-  /** Loads the backup and checks it with a dump. Not stoppable: it is what a stop falls back on. */
+  /**
+   * Loads the backup and checks it with a dump, first asking for Protect OFF when the probe
+   * asked for Protect ON. Not stoppable: it is what a stop falls back on, so it sends the
+   * backup even when the maintainer can no longer be asked.
+   */
   async function restoreBackup(saved: VerifiedBackup): Promise<string[]> {
-    const retry = `restore it with --restore <session folder>/${saved.syxFile}`;
+    const findings: string[] = [];
+    const retry = `${protectMayBeOn ? 'set Protect OFF and ' : ''}restore it with --restore <session folder>/${saved.syxFile}`;
+    if (protectMayBeOn) {
+      try {
+        await operator.instruct(PROTECT_OFF_INSTRUCTION);
+      } catch (error) {
+        findings.push(`Could not ask for Protect OFF before restoring the backup (${String(error)}); sent it anyway.`);
+      }
+    }
+    return [...findings, ...(await sendBackup(saved, retry))];
+  }
+
+  async function sendBackup(saved: VerifiedBackup, retry: string): Promise<string[]> {
     try {
       await exchange(memoryImageSyx(wireChannel, saved.image), isAdaSysEx, settings.timeoutMs);
       const read = await readMemoryImage();

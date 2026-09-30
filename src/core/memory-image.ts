@@ -99,3 +99,8 @@ export function memoryImageDifferences(wrote: MemoryImage, readBack: MemoryImage
     return differences.length === 0 ? [] : [{ memory: i + 1, differences }];
   });
 }
+
+/** Memory n gets Memory n + 1, and Memory 128 gets Memory 1. */
+export function rotatedByOne(image: MemoryImage): MemoryImage {
+  return { programs: [...image.programs.slice(1), image.programs[0]!] };
+}
