@@ -20,10 +20,14 @@ import {
   type ProbeReport,
   type ProbeSelection,
 } from './probe-runner.js';
+import { channelModesProbe } from './probes/channel-modes.js';
 import { connectivityProbe } from './probes/connectivity.js';
 import { documentedCommandsProbe } from './probes/documented-commands.js';
+import { frontPanelLockoutProbe } from './probes/front-panel-lockout.js';
 import { memoryImageDumpProbe } from './probes/memory-image-dump.js';
 import { memoryImageLoadProbe } from './probes/memory-image-load.js';
+import { programChangeInProbe } from './probes/program-change-in.js';
+import { programChangeOutProbe } from './probes/program-change-out.js';
 import { restoreProbe } from './probes/restore.js';
 import { voicingMasterGainProbe } from './probes/voicing-master-gain.js';
 import { workingRegisterWriteProbe } from './probes/working-register-write.js';
@@ -36,6 +40,10 @@ const PROBES: readonly Probe<unknown>[] = [
   workingRegisterWriteProbe,
   voicingMasterGainProbe,
   memoryImageLoadProbe,
+  channelModesProbe,
+  frontPanelLockoutProbe,
+  programChangeOutProbe,
+  programChangeInProbe,
 ];
 
 /** Extra console output for probes whose data is worth showing beyond the findings. */
@@ -76,9 +84,16 @@ Probes:
                         (restores the Program that was sounding afterwards)
   memory-image-load     load the backup with its Memories rotated by one, dump it back and compare
                         (writes Memories; loads the backup back afterwards)
+  channel-modes         guided: set the unit's MIDI channel to ALL, then OFF, then back to the session's channel;
+                        each time the harness checks which channels the unit answers SysEx on
+  front-panel-lockout   guided: start a front-panel edit; the harness checks whether the unit still answers,
+                        then you abandon the edit
+  program-change-out    guided: select a Memory on the front panel; the harness records any Program Change sent
+  program-change-in     guided: the harness sends a Program Change and finds which Memory it loaded, from the display
+                        and the Working Register (replaces the Working Register; asks first)
   --restore <file.syx>  load a saved Memory Image (e.g. a session's memory-image-<n>.syx) and check it with a dump
   --all                 run every non-destructive probe (connectivity and memory-image-dump:
-                        the others change the Working Register)`;
+                        the others change the Working Register or need you at the front panel)`;
 
 async function main(): Promise<number> {
   const { values } = parseArgs({

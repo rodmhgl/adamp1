@@ -95,6 +95,11 @@ export interface ProbeContext {
     accept: (bytes: Uint8Array) => boolean,
     timeoutMs?: number,
   ): Promise<MidiMessage | undefined>;
+  /**
+   * Resolves with every received message that `accept` matches while `during` runs,
+   * such as the maintainer's front-panel change. Sends nothing.
+   */
+  listenWhile(accept: (bytes: Uint8Array) => boolean, during: () => Promise<void>): Promise<MidiMessage[]>;
   /** Requests the Memory Image and checks the reply, waiting up to the dump timeout. */
   readMemoryImage(): Promise<MemoryImageRead>;
   /** The session's latest verified backup. A probe that writes Memories always has one. */
@@ -208,6 +213,19 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
     dumpTimeoutMs,
     operator,
     request: (request, accept, timeoutMs = settings.timeoutMs) => exchange(request, accept, timeoutMs, settings.signal),
+    async listenWhile(accept, during) {
+      const received: MidiMessage[] = [];
+      const stopListening = settings.port.onMessage((message) => {
+        if (accept(message.bytes)) received.push(message);
+      });
+      try {
+        await during();
+      } finally {
+        stopListening();
+      }
+      if (settings.signal?.aborted) throw new ProbeStopped();
+      return received;
+    },
     readMemoryImage: () => readMemoryImage(settings.signal),
     backup,
     saveBackup: (received) => {

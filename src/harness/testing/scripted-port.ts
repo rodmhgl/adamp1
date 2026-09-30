@@ -11,7 +11,7 @@ export interface ScriptStep {
 /**
  * A fake MIDI port for tests. It checks each sent message against the next
  * scripted request and answers with that step's reply bytes.
- * An empty `reply` simulates a unit that stays silent.
+ * An empty `reply` simulates a unit that stays silent. `emit` sends something unprompted.
  */
 export class ScriptedPort implements MidiPort {
   readonly sent: number[][] = [];
@@ -37,6 +37,11 @@ export class ScriptedPort implements MidiPort {
   onMessage(listener: (message: MidiMessage) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /** Delivers a message the unit sends unprompted, e.g. after a front-panel change. */
+  emit(bytes: number[]): void {
+    this.deliver(bytes);
   }
 
   private deliver(bytes: number[]): void {

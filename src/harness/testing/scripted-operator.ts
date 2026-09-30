@@ -3,8 +3,18 @@ import type { Operator } from '../operator.js';
 /** Scripted acknowledgement of an `instruct`. */
 export const DONE = Symbol('done');
 
-/** One scripted reply: the answer to an `ask`, the choice for a `confirm`, or `DONE` for an `instruct`. */
-export type OperatorAnswer = string | boolean | typeof DONE;
+/** Scripted acknowledgement of an `instruct` after doing something on the unit, such as a front-panel change. */
+export interface DoneAfter {
+  doneAfter: () => void;
+}
+
+/** Acknowledges an `instruct` after running `action`, e.g. making a `ScriptedPort` emit what the unit would send. */
+export function doneAfter(action: () => void): DoneAfter {
+  return { doneAfter: action };
+}
+
+/** One scripted reply: the answer to an `ask`, the choice for a `confirm`, or `DONE` (or `doneAfter`) for an `instruct`. */
+export type OperatorAnswer = string | boolean | typeof DONE | DoneAfter;
 
 /** Everything the harness put to the operator, in order. */
 export type OperatorEvent =
@@ -40,6 +50,7 @@ export class ScriptedOperator implements Operator {
   async instruct(instruction: string): Promise<void> {
     this.events.push({ kind: 'instruct', instruction });
     const answer = this.next(instruction);
+    if (typeof answer === 'object') return answer.doneAfter();
     if (answer !== DONE) throw new Error(`Scripted ${String(answer)} for instruct: ${instruction}`);
   }
 
