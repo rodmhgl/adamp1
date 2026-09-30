@@ -4,6 +4,8 @@ import type { MidiMessage, MidiPort } from '../../core/midi-port.js';
 export interface ScriptStep {
   expect: number[];
   reply: number[][];
+  /** Runs once the request has arrived, e.g. to stop the probe while it waits. */
+  afterSend?: () => void;
 }
 
 /**
@@ -29,6 +31,7 @@ export class ScriptedPort implements MidiPort {
     for (const reply of step.reply) {
       queueMicrotask(() => this.deliver(reply));
     }
+    step.afterSend?.();
   }
 
   onMessage(listener: (message: MidiMessage) => void): () => void {

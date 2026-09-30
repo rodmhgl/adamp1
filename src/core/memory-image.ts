@@ -3,7 +3,7 @@
  * the unit replies with command 0B carrying all 128 Programs, 11 values each, in Memory
  * order and with no address byte. The same 0B frame sent to the unit loads the Memory Image.
  */
-import { parseProgram, PROGRAM_LENGTH, type Program } from './program.js';
+import { parseProgram, programDifferences, PROGRAM_LENGTH, type ParameterDifference, type Program } from './program.js';
 import { buildFrame, hex, parseFrame, SYSEX_END, SYSEX_START } from './sysex.js';
 
 const REQUEST_MEMORY_IMAGE = 0x0a;
@@ -84,4 +84,18 @@ export function parseMemoryImageSyx(bytes: ArrayLike<number>): ParsedMemoryImage
   if (!parsed.ok) return { ok: false, error: 'checksum-mismatch', detail: parsed.detail };
   if (!image.ok) return image;
   return { ok: true, channel, image: image.image };
+}
+
+export interface MemoryDifference {
+  /** 1–128. */
+  memory: number;
+  differences: ParameterDifference[];
+}
+
+/** Every Memory whose Program read back differs from the one written, in Memory order. */
+export function memoryImageDifferences(wrote: MemoryImage, readBack: MemoryImage): MemoryDifference[] {
+  return wrote.programs.flatMap((program, i) => {
+    const differences = programDifferences(program, readBack.programs[i]!);
+    return differences.length === 0 ? [] : [{ memory: i + 1, differences }];
+  });
 }

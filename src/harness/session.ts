@@ -11,6 +11,7 @@ import {
   type SavedBackup,
   type TrafficEntry,
   type Verdict,
+  type VerifiedBackup,
 } from './probe-runner.js';
 import { SessionRecorder, wallClock } from './session-recorder.js';
 
@@ -25,6 +26,8 @@ export interface SessionOptions {
   probes: readonly Probe<unknown>[];
   /** Folder for this session's capture log and report. */
   sessionDir: string;
+  /** Aborting it stops the running probe, which restores the backup where needed, and skips the rest. */
+  signal?: AbortSignal;
   /** Called as each probe finishes, before the next starts. */
   onProbeFinished?(report: ProbeReport<unknown>): void;
 }
@@ -103,16 +106,22 @@ export async function runSession(options: SessionOptions): Promise<SessionReport
     onMessage: (listener) => port.onMessage(listener),
   };
 
+  let backup: VerifiedBackup | undefined;
   try {
     for (const probe of probes) {
+      if (options.signal?.aborted) break;
       recorder.heading(`probe ${probe.name} (${probe.kind})`);
       const probeReport = await runProbe(probe, {
         port: recordedPort,
         channel: connection.channel,
         timeoutMs,
         dumpTimeoutMs,
+        operator,
+        ...(options.signal && { signal: options.signal }),
+        backup: () => backup,
         saveBackup(received) {
           const saved = recorder.saveMemoryImage(received);
+          backup = { ...saved, image: received.image };
           report.backup = { probe: probe.name, savedAt: new Date().toISOString(), ...saved };
           return saved;
         },

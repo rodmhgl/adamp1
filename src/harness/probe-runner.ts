@@ -1,5 +1,8 @@
-import type { MemoryImage } from '../core/memory-image.js';
+import { MEMORY_COUNT, memoryImageDifferences, memoryImageSyx, type MemoryImage } from '../core/memory-image.js';
 import type { MidiMessage, MidiPort } from '../core/midi-port.js';
+import { hexBytes, isAdaSysEx } from '../core/sysex.js';
+import { describeFailedRead, requestMemoryImage, type MemoryImageRead } from './memory-image-transfer.js';
+import type { Operator } from './operator.js';
 
 export type Verdict = 'confirmed' | 'refuted' | 'inconclusive';
 
@@ -43,6 +46,12 @@ export interface SessionSettings {
   timeoutMs: number;
   /** How long to wait for a Memory Image dump. Defaults to `DEFAULT_DUMP_TIMEOUT_MS`. */
   dumpTimeoutMs?: number;
+  /** Who to ask. Without one, a probe that asks anything fails. */
+  operator?: Operator;
+  /** Aborting it stops the probe at its next step; the runner then restores the backup where needed. */
+  signal?: AbortSignal;
+  /** The session's latest verified backup, if it has one. Probes that write Memories are refused without one. */
+  backup?(): VerifiedBackup | undefined;
   /** Saves a verified Memory Image as the session's backup. Without it, saving a backup throws. */
   saveBackup?(received: ReceivedMemoryImage): SavedBackup;
 }
@@ -62,11 +71,20 @@ export interface SavedBackup {
   decodedFile: string;
 }
 
+/** A backup saved to disk, with the Memory Image it holds. */
+export interface VerifiedBackup extends SavedBackup {
+  image: MemoryImage;
+}
+
+export const PROTECT_OFF_INSTRUCTION =
+  'Set Protect OFF so the unit accepts the Memory Image: on the front panel, press Store, then Bank+8.';
+
 export interface ProbeContext {
   /** 0-based channel, as on the wire. */
   wireChannel: number;
   timeoutMs: number;
   dumpTimeoutMs: number;
+  operator: Operator;
   /**
    * Sends `request` and resolves with the first received message that `accept`
    * matches, or `undefined` when none arrives within `timeoutMs` (default: the session's).
@@ -77,9 +95,44 @@ export interface ProbeContext {
     accept: (bytes: Uint8Array) => boolean,
     timeoutMs?: number,
   ): Promise<MidiMessage | undefined>;
+  /** Requests the Memory Image and checks the reply, waiting up to the dump timeout. */
+  readMemoryImage(): Promise<MemoryImageRead>;
+  /** The session's latest verified backup. A probe that writes Memories always has one. */
+  backup(): VerifiedBackup | undefined;
   /** Saves a Memory Image the probe has verified to disk as the session's backup. */
   saveBackup(received: ReceivedMemoryImage): SavedBackup;
+  /**
+   * The only way to write Memories. Asks the maintainer to confirm, showing how many
+   * Memories change against the backup, then to set Protect OFF, then sends `image`
+   * as a Memory Image load (command 0B) and waits the reply timeout for any answer,
+   * which it returns as findings. Throws `MemoryWriteRefused`, having sent nothing,
+   * when the session has no verified backup or the maintainer declines.
+   */
+  loadMemoryImage(image: MemoryImage): Promise<string[]>;
 }
+
+/** A write to Memories that was never sent. */
+export class MemoryWriteRefused extends Error {
+  constructor(
+    summary: string,
+    readonly findings: string[] = [],
+  ) {
+    super(summary);
+  }
+}
+
+class ProbeStopped extends Error {
+  constructor() {
+    super('Stopped by the maintainer.');
+  }
+}
+
+const NO_OPERATOR: Operator = {
+  confirm: () => Promise.reject(new Error('This run has no operator to ask.')),
+  instruct: () => Promise.reject(new Error('This run has no operator to ask.')),
+  ask: () => Promise.reject(new Error('This run has no operator to ask.')),
+  warn() {},
+};
 
 /** A single probe by name, or every probe that declares itself non-destructive, in registry order. */
 export type ProbeSelection = string | { allNonDestructive: true };
@@ -93,51 +146,147 @@ export function selectProbes(registry: readonly Probe<unknown>[], selection: Pro
   return [probe];
 }
 
+/**
+ * Runs one probe, recording its traffic. Enforces the write-safety invariant: a probe
+ * that writes Memories is refused without a verified backup, every write is confirmed,
+ * and whenever the unit may no longer hold the backup when the probe ends — however it
+ * ends — the backup is loaded back and checked with a dump.
+ */
 export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): Promise<ProbeReport<T>> {
   const traffic: TrafficEntry[] = [];
   const stopRecording = settings.port.onMessage(({ bytes, timestamp }) =>
     traffic.push({ direction: 'received', bytes: [...bytes], timestamp }),
   );
+  const wireChannel = settings.channel - 1;
+  const dumpTimeoutMs = settings.dumpTimeoutMs ?? DEFAULT_DUMP_TIMEOUT_MS;
+  const operator = settings.operator ?? NO_OPERATOR;
+  const backup = () => settings.backup?.();
+  /** False from the moment a Memory write is sent until a dump shows the unit holds the backup again. */
+  let unitHoldsBackup = true;
+
+  function exchange(
+    request: Uint8Array,
+    accept: (bytes: Uint8Array) => boolean,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<MidiMessage | undefined> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(new ProbeStopped());
+      const timer = setTimeout(() => finish(undefined), timeoutMs);
+      const stopListening = settings.port.onMessage((message) => {
+        if (!sameBytes(message.bytes, request) && accept(message.bytes)) finish(message);
+      });
+      const onAbort = () => {
+        cleanUp();
+        reject(new ProbeStopped());
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      function cleanUp() {
+        clearTimeout(timer);
+        stopListening();
+        signal?.removeEventListener('abort', onAbort);
+      }
+      function finish(message: MidiMessage | undefined) {
+        cleanUp();
+        resolve(message);
+      }
+      traffic.push({ direction: 'sent', bytes: [...request], timestamp: performance.now() });
+      settings.port.send(request);
+    });
+  }
+
+  async function readMemoryImage(signal?: AbortSignal): Promise<MemoryImageRead> {
+    const read = await requestMemoryImage((request, accept, timeoutMs) => exchange(request, accept, timeoutMs, signal), wireChannel, dumpTimeoutMs);
+    const saved = backup();
+    if (read.ok && saved && memoryImageDifferences(saved.image, read.image).length === 0) unitHoldsBackup = true;
+    return read;
+  }
 
   const context: ProbeContext = {
-    wireChannel: settings.channel - 1,
+    wireChannel,
     timeoutMs: settings.timeoutMs,
-    dumpTimeoutMs: settings.dumpTimeoutMs ?? DEFAULT_DUMP_TIMEOUT_MS,
-    request: (request, accept, timeoutMs = settings.timeoutMs) => {
-      return new Promise((resolve) => {
-        const timer = setTimeout(() => finish(undefined), timeoutMs);
-        const stopListening = settings.port.onMessage((message) => {
-          if (!sameBytes(message.bytes, request) && accept(message.bytes)) finish(message);
-        });
-        function finish(message: MidiMessage | undefined) {
-          clearTimeout(timer);
-          stopListening();
-          resolve(message);
-        }
-        traffic.push({ direction: 'sent', bytes: [...request], timestamp: performance.now() });
-        settings.port.send(request);
-      });
-    },
+    dumpTimeoutMs,
+    operator,
+    request: (request, accept, timeoutMs = settings.timeoutMs) => exchange(request, accept, timeoutMs, settings.signal),
+    readMemoryImage: () => readMemoryImage(settings.signal),
+    backup,
     saveBackup: (received) => {
       if (!settings.saveBackup) throw new Error('This run has no session folder to save a backup to.');
-      return settings.saveBackup(received);
+      const saved = settings.saveBackup(received);
+      // A backup is a dump just read from the unit, so the unit holds it.
+      unitHoldsBackup = true;
+      return saved;
+    },
+    async loadMemoryImage(image) {
+      const saved = backup();
+      if (!saved) throw noBackup();
+      const changes = memoryImageDifferences(saved.image, image).length;
+      const confirmed = await operator.confirm(
+        `Load a Memory Image into the unit? It changes ${changes} of ${MEMORY_COUNT} Memories. ` +
+          `The backup to restore from is ${saved.syxFile}.`,
+      );
+      if (settings.signal?.aborted) throw new ProbeStopped();
+      if (!confirmed) throw new MemoryWriteRefused('The maintainer declined the Memory Image load, so nothing was written.');
+      await operator.instruct(PROTECT_OFF_INSTRUCTION);
+
+      // Checked here so a stop during the prompt sends nothing: `exchange` sends synchronously from here on.
+      if (settings.signal?.aborted) throw new ProbeStopped();
+      unitHoldsBackup = false;
+      const reply = await exchange(memoryImageSyx(wireChannel, image), isAdaSysEx, settings.timeoutMs, settings.signal);
+      return reply ? [`The unit answered the Memory Image load with ${hexBytes(reply.bytes)}.`] : [];
     },
   };
 
+  /** Loads the backup and checks it with a dump. Not stoppable: it is what a stop falls back on. */
+  async function restoreBackup(saved: VerifiedBackup): Promise<string[]> {
+    const retry = `restore it with --restore <session folder>/${saved.syxFile}`;
+    try {
+      await exchange(memoryImageSyx(wireChannel, saved.image), isAdaSysEx, settings.timeoutMs);
+      const read = await readMemoryImage();
+      if (!read.ok) return [`WARNING: the restore of the backup could not be checked (${describeFailedRead(read)}); ${retry}.`];
+      const differences = memoryImageDifferences(saved.image, read.image).length;
+      if (differences === 0) return [`Restored the backup ${saved.syxFile}: the dump read back matches it.`];
+      return [`WARNING: the restore of the backup did not read back as the backup: ${differences} Memories differ; ${retry}.`];
+    } catch (error) {
+      return [`WARNING: the restore of the backup failed (${String(error)}); ${retry}.`];
+    }
+  }
+
   try {
-    const outcome = await probe.run(context);
+    if (probe.kind === 'writes-memories' && !backup()) {
+      const refused = noBackup();
+      return { probe: probe.name, verdict: 'inconclusive', summary: refused.message, findings: refused.findings, traffic };
+    }
+
+    let outcome: ProbeOutcome<T>;
+    try {
+      outcome = await probe.run(context);
+    } catch (error) {
+      outcome = failedOutcome(error, settings.signal);
+    }
+    const saved = backup();
+    if (!unitHoldsBackup && saved) outcome = { ...outcome, findings: [...outcome.findings, ...(await restoreBackup(saved))] };
     return { probe: probe.name, ...outcome, traffic };
-  } catch (error) {
-    return {
-      probe: probe.name,
-      verdict: 'inconclusive',
-      summary: 'The probe failed before reaching a verdict.',
-      findings: [String(error)],
-      traffic,
-    };
   } finally {
     stopRecording();
   }
+}
+
+function noBackup(): MemoryWriteRefused {
+  return new MemoryWriteRefused('Refused to write Memories: this session has no verified backup Memory Image, so nothing was sent.', [
+    'Run memory-image-dump first in the same session; a probe that writes Memories needs its backup.',
+  ]);
+}
+
+function failedOutcome(error: unknown, signal: AbortSignal | undefined): ProbeOutcome<never> {
+  // Checked first: stopping can also surface as an aborted operator prompt.
+  if (signal?.aborted || error instanceof ProbeStopped) {
+    return { verdict: 'inconclusive', summary: 'Stopped by the maintainer before reaching a verdict.', findings: [] };
+  }
+  if (error instanceof MemoryWriteRefused) {
+    return { verdict: 'inconclusive', summary: error.message, findings: error.findings };
+  }
+  return { verdict: 'inconclusive', summary: 'The probe failed before reaching a verdict.', findings: [String(error)] };
 }
 
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {

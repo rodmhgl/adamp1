@@ -1,5 +1,7 @@
+import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
+import { parseMemoryImageSyx } from '../core/memory-image.js';
 import type { NamedRawValue } from '../core/program.js';
 import {
   chooseConnection,
@@ -21,6 +23,8 @@ import {
 import { connectivityProbe } from './probes/connectivity.js';
 import { documentedCommandsProbe } from './probes/documented-commands.js';
 import { memoryImageDumpProbe } from './probes/memory-image-dump.js';
+import { memoryImageLoadProbe } from './probes/memory-image-load.js';
+import { restoreProbe } from './probes/restore.js';
 import { voicingMasterGainProbe } from './probes/voicing-master-gain.js';
 import { workingRegisterWriteProbe } from './probes/working-register-write.js';
 import { runSession } from './session.js';
@@ -31,6 +35,7 @@ const PROBES: readonly Probe<unknown>[] = [
   documentedCommandsProbe,
   workingRegisterWriteProbe,
   voicingMasterGainProbe,
+  memoryImageLoadProbe,
 ];
 
 /** Extra console output for probes whose data is worth showing beyond the findings. */
@@ -46,12 +51,17 @@ const DEFAULT_TIMEOUT_MS = 3000;
 
 const USAGE = `Usage: npm run harness -- [--probe <name> | --all] [--in <input port> --out <output port> --channel <1-16>]
                            [--timeout <ms>] [--dump-timeout <ms>] [--sessions-dir <folder>]
+       npm run harness -- --restore <file.syx> [--in … --out … --channel …]
        npm run harness -- --list-ports
 
 Without --in/--out/--channel the harness asks for the ports and channel, offering last session's as defaults.
 Each session writes capture.log and report.json to a new folder under --sessions-dir (default harness-sessions).
 --timeout is the wait for each reply (default ${DEFAULT_TIMEOUT_MS} ms); --dump-timeout the wait for a Memory Image dump
 (default ${DEFAULT_DUMP_TIMEOUT_MS} ms).
+
+Probes that write Memories, and --restore, first run memory-image-dump to take the session's backup, and are
+refused if it fails. Each write asks for confirmation, showing how many Memories change. Ctrl-C stops the running
+probe and loads the backup back where needed; press it again to quit at once.
 
 Probes:
   connectivity          (default) request the Working Register and print its eleven raw values
@@ -64,6 +74,9 @@ Probes:
                         (restores the Program that was sounding afterwards)
   voicing-master-gain   set Master Gain, change Voicing over SysEx, and check whether Master Gain was reset to 0
                         (restores the Program that was sounding afterwards)
+  memory-image-load     load the backup with its Memories rotated by one, dump it back and compare
+                        (writes Memories; loads the backup back afterwards)
+  --restore <file.syx>  load a saved Memory Image (e.g. a session's memory-image-<n>.syx) and check it with a dump
   --all                 run every non-destructive probe (connectivity and memory-image-dump:
                         the others change the Working Register)`;
 
@@ -76,6 +89,7 @@ async function main(): Promise<number> {
       timeout: { type: 'string' },
       'dump-timeout': { type: 'string' },
       probe: { type: 'string' },
+      restore: { type: 'string' },
       all: { type: 'boolean' },
       'sessions-dir': { type: 'string', default: 'harness-sessions' },
       'list-ports': { type: 'boolean' },
@@ -87,18 +101,36 @@ async function main(): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  if (values.all && values.probe !== undefined) {
-    console.error(`Use --probe or --all, not both.\n\n${USAGE}`);
+  if ([values.all, values.probe, values.restore].filter((value) => value !== undefined).length > 1) {
+    console.error(`Use one of --probe, --all and --restore.\n\n${USAGE}`);
     return 2;
   }
-  const selection: ProbeSelection = values.all ? { allNonDestructive: true } : (values.probe ?? 'connectivity');
   let probes: Probe<unknown>[];
-  try {
-    probes = selectProbes(PROBES, selection);
-  } catch (error) {
-    console.error(`${(error as Error).message}\n\n${USAGE}`);
-    return 2;
+  if (values.restore !== undefined) {
+    let bytes: Buffer;
+    try {
+      bytes = await readFile(values.restore);
+    } catch (error) {
+      console.error(`Cannot read ${values.restore}: ${(error as Error).message}`);
+      return 2;
+    }
+    const parsed = parseMemoryImageSyx(bytes);
+    if (!parsed.ok) {
+      console.error(`${values.restore} is not a valid Memory Image (${parsed.error}): ${parsed.detail}.`);
+      return 2;
+    }
+    probes = [restoreProbe(values.restore, parsed.image)];
+  } else {
+    const selection: ProbeSelection = values.all ? { allNonDestructive: true } : (values.probe ?? 'connectivity');
+    try {
+      probes = selectProbes(PROBES, selection);
+    } catch (error) {
+      console.error(`${(error as Error).message}\n\n${USAGE}`);
+      return 2;
+    }
   }
+  // A write needs a backup taken in the same session.
+  if (probes.some(({ kind }) => kind === 'writes-memories')) probes = [memoryImageDumpProbe, ...probes];
   const timeoutMs = values.timeout === undefined ? DEFAULT_TIMEOUT_MS : Number(values.timeout);
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     console.error(`--timeout must be a positive number of milliseconds, got "${values.timeout}".`);
@@ -118,7 +150,14 @@ async function main(): Promise<number> {
       return 0;
     }
 
-    const operator = createConsoleOperator();
+    const stop = new AbortController();
+    const interrupt = () => {
+      if (stop.signal.aborted) process.exit(130);
+      console.warn('\nStopping: the unit is put back to its backup where needed. Press Ctrl-C again to quit at once.');
+      stop.abort();
+    };
+    process.on('SIGINT', interrupt);
+    const operator = createConsoleOperator({ signal: stop.signal, onInterrupt: interrupt });
     try {
       const settingsFile = defaultSettingsFile();
       let connection: Connection;
@@ -154,6 +193,7 @@ async function main(): Promise<number> {
           dumpTimeoutMs,
           probes,
           sessionDir,
+          signal: stop.signal,
           onProbeFinished: printReport,
         });
         console.log();
