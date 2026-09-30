@@ -1,0 +1,11 @@
+# ADA manuals — copyrighted, kept locally as references only
+*.pdf
+# Third-party captures/references — local cross-checking only (ADR 0002)
+reference/
+
+node_modules/
+dist/
+.vite/
+.DS_Store
+test-results/
+playwright-report/
