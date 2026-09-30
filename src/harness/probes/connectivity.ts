@@ -8,11 +8,8 @@ export const connectivityProbe: Probe<NamedRawValue[]> = {
   name: 'connectivity',
   kind: 'non-destructive',
   async run({ wireChannel, timeoutMs, request }) {
-    const requestBytes = workingRegisterRequest(wireChannel);
     // Take any SysEx as the reply, so a reply in an unexpected format refutes instead of timing out.
-    // Skip an exact echo of the request, which some interfaces loop back.
-    const echoed = hexBytes(requestBytes);
-    const reply = await request(requestBytes, (bytes) => isSysEx(bytes) && hexBytes(bytes) !== echoed);
+    const reply = await request(workingRegisterRequest(wireChannel), isSysEx);
 
     if (!reply) {
       return {
@@ -24,6 +21,7 @@ export const connectivityProbe: Probe<NamedRawValue[]> = {
           '- the unit\'s MIDI channel is set to ALL or OFF',
           '- MIDI is locked by a front-panel edit in progress: finish or cancel it',
           '- the MIDI cable or interface drops SysEx',
+          '- the unit\'s firmware is v1.x (Level 1), which has no SysEx: power up and read the number after "ADA"; the first digit must be 2',
         ],
       };
     }

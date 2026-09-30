@@ -69,6 +69,7 @@ describe('connectivity probe', () => {
     expect(findings).toMatch(/ALL or OFF/);
     expect(findings).toMatch(/front-panel edit/i);
     expect(findings).toMatch(/drops SysEx/i);
+    expect(findings).toMatch(/firmware .* v1\.x .* no SysEx/i);
     expect(port.sent).toEqual([REQUEST_WORKING_REGISTER_CH3]);
     expect(port.unexpected).toEqual([]);
     expect(report.traffic.map((entry) => entry.direction)).toEqual(['sent']);

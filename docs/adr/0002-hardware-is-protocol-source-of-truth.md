@@ -6,3 +6,8 @@ The MP-1 manual's MIDI section is wrong in places. The unit actually uses undocu
 
 - Only captures from our own unit are committed as test fixtures. Third-party captures (e.g. the 1995 Amiga archive) are used locally for cross-checking only.
 - v1 supports MP-1 v2.x firmware only. The protocol layer keeps a model/firmware seam for the MP-1 Classic later.
+- The source-of-truth unit must run Level 2 (v2.x) firmware. Level 1 firmware has no SysEx: the manual (§7.2) lists SysEx upload/download and real-time parameter access as Level 2 features.
+
+## Findings
+
+- **2026-09-30: the maintainer's unit is v1.38 (Level 1).** At power-up it shows "ADA" and then "138"; the first digit is the software level. The unit receives Program Change. It ignored the Working Register request (08), and so did the BooleanEffect editor. The USB-MIDI interface was checked in both directions (its input saw traffic from the MP-1's MIDI THRU), so the cable is not the cause. Hardware acceptance (#14) and captured fixtures (#15) wait for a v2.x EPROM, which is expected around 2026-10-07. The `documented-commands` probe (#11) checks whether v1.38 answers the manual's 06/07 messages. Record its result here.

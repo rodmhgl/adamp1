@@ -45,6 +45,7 @@ export interface ProbeContext {
   /**
    * Sends `request` and resolves with the first received message that `accept`
    * matches, or `undefined` when none arrives within the timeout.
+   * An exact echo of the request, which some interfaces loop back, is never a match.
    */
   request(request: Uint8Array, accept: (bytes: Uint8Array) => boolean): Promise<MidiMessage | undefined>;
 }
@@ -62,7 +63,7 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
       return new Promise((resolve) => {
         const timer = setTimeout(() => finish(undefined), settings.timeoutMs);
         const stopListening = settings.port.onMessage((message) => {
-          if (accept(message.bytes)) finish(message);
+          if (!sameBytes(message.bytes, request) && accept(message.bytes)) finish(message);
         });
         function finish(message: MidiMessage | undefined) {
           clearTimeout(timer);
@@ -89,4 +90,8 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
   } finally {
     stopRecording();
   }
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  return a.length === b.length && a.every((byte, i) => byte === b[i]);
 }
