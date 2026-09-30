@@ -9,3 +9,5 @@ dist/
 .DS_Store
 test-results/
 playwright-report/
+# Harness session output (capture logs, reports); curate into fixtures deliberately
+harness-sessions/

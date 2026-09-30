@@ -17,10 +17,14 @@ A command-line tool (Node 20+) that questions a real MP-1 over a USB-MIDI interf
 ```sh
 npm install
 npm run harness -- --list-ports
-npm run harness -- --in "<input port>" --out "<output port>" --channel 1 [--probe <name>] [--timeout 3000]
+npm run harness -- [--probe <name> | --all] [--in "<input port>" --out "<output port>" --channel 1] [--timeout 3000]
 ```
 
-The default probe, `connectivity`, requests the Working Register and prints the eleven raw parameter values, or explains why no valid reply arrived. `--probe documented-commands` sends the manual's Get/Set Parameters (07/06) messages to the Working Register and records any reply. It sets Master Gain in the Working Register to 0; recall the program to restore it. `npm run harness -- --help` lists the probes.
+Without `--in`, `--out` and `--channel`, the harness lists the ports and asks for them and the channel. It remembers the choice and offers it as the default next time. Each session starts by asking for the firmware version from the power-up display, and warns if it isn't v2.x.
+
+The default probe, `connectivity`, requests the Working Register and prints the eleven raw parameter values, or explains why no valid reply arrived. `--probe documented-commands` sends the manual's Get/Set Parameters (07/06) messages to the Working Register and records any reply. It sets Master Gain in the Working Register to 0; recall the program to restore it. `--all` runs every non-destructive probe. `npm run harness -- --help` lists the probes.
+
+Each session writes to a new folder under `harness-sessions/` (ignored by git): `capture.log` has every MIDI message sent and received, timestamped, byte by byte, and `report.json` has the firmware version and each probe's verdict and evidence.
 
 Run the harness from Windows, macOS or native Linux. WSL2 can't see USB MIDI devices.
 

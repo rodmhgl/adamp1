@@ -2,8 +2,11 @@ import type { MidiMessage, MidiPort } from '../core/midi-port.js';
 
 export type Verdict = 'confirmed' | 'refuted' | 'inconclusive';
 
-/** What a probe does to the unit. Later tickets add Memory-writing and operator-guided probes. */
-export type ProbeKind = 'non-destructive';
+/**
+ * What a probe does: leaves the unit's Memories alone, writes them, or needs the
+ * maintainer at the front panel. Only non-destructive probes run in "all non-destructive".
+ */
+export type ProbeKind = 'non-destructive' | 'writes-memories' | 'guided';
 
 export interface Probe<T> {
   name: string;
@@ -48,6 +51,18 @@ export interface ProbeContext {
    * An exact echo of the request, which some interfaces loop back, is never a match.
    */
   request(request: Uint8Array, accept: (bytes: Uint8Array) => boolean): Promise<MidiMessage | undefined>;
+}
+
+/** A single probe by name, or every probe that declares itself non-destructive, in registry order. */
+export type ProbeSelection = string | { allNonDestructive: true };
+
+export function selectProbes(registry: readonly Probe<unknown>[], selection: ProbeSelection): Probe<unknown>[] {
+  if (typeof selection !== 'string') return registry.filter((probe) => probe.kind === 'non-destructive');
+  const probe = registry.find(({ name }) => name === selection);
+  if (!probe) {
+    throw new Error(`Unknown probe "${selection}". Known probes: ${registry.map(({ name }) => name).join(', ')}.`);
+  }
+  return [probe];
 }
 
 export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): Promise<ProbeReport<T>> {
