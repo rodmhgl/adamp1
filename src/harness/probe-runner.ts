@@ -1,6 +1,8 @@
 import { MEMORY_COUNT, memoryImageDifferences, memoryImageSyx, type MemoryImage } from '../core/memory-image.js';
 import type { MidiMessage, MidiPort } from '../core/midi-port.js';
-import { hexBytes, isAdaSysEx } from '../core/sysex.js';
+import type { Program } from '../core/program.js';
+import { hex, hexBytes, isAdaSysEx } from '../core/sysex.js';
+import { addressedProgramWrite } from '../core/working-register.js';
 import { describeFailedRead, requestMemoryImage, type MemoryImageRead } from './memory-image-transfer.js';
 import type { Operator } from './operator.js';
 
@@ -88,8 +90,8 @@ export interface MemoryImageLoadOptions {
   protectOn?: boolean;
 }
 
-/** What came back from a Memory Image load. */
-export interface MemoryImageLoadAnswer {
+/** What came back from a write to Memories. */
+export interface MemoryWriteAnswer {
   /** The first ADA SysEx the unit sent within the reply timeout, if any. */
   reply?: MidiMessage;
   /** The reply as evidence, if any. */
@@ -124,13 +126,20 @@ export interface ProbeContext {
   /** Saves a Memory Image the probe has verified to disk as the session's backup. */
   saveBackup(received: ReceivedMemoryImage): SavedBackup;
   /**
-   * The only way to write Memories. Asks the maintainer to confirm, showing how many
+   * One of the two ways to write Memories. Asks the maintainer to confirm, showing how many
    * Memories change against the backup, then to set Protect OFF (or ON, with `protectOn`),
    * then sends `image` as a Memory Image load (command 0B) and waits the reply timeout
    * for any answer. Throws `MemoryWriteRefused`, having sent nothing, when the session
    * has no verified backup or the maintainer declines.
    */
-  loadMemoryImage(image: MemoryImage, options?: MemoryImageLoadOptions): Promise<MemoryImageLoadAnswer>;
+  loadMemoryImage(image: MemoryImage, options?: MemoryImageLoadOptions): Promise<MemoryWriteAnswer>;
+  /**
+   * The other way to write Memories, for finding out whether one Memory can be written
+   * directly. Asks the maintainer to confirm, then to set Protect OFF, then sends `program`
+   * with command 09 addressed to `address` instead of the Working Register (7F), and waits
+   * the reply timeout for any answer. Refuses as `loadMemoryImage` does.
+   */
+  writeProgramToAddress(address: number, program: Program): Promise<MemoryWriteAnswer>;
 }
 
 /** A write to Memories that was never sent. */
@@ -141,6 +150,14 @@ export class MemoryWriteRefused extends Error {
   ) {
     super(summary);
   }
+}
+
+interface MemoryWrite {
+  /** What the maintainer confirms, given the backup that will be restored. */
+  question(saved: VerifiedBackup): string;
+  label: string;
+  message: Uint8Array;
+  protectOn?: boolean;
 }
 
 class ProbeStopped extends Error {
@@ -254,26 +271,45 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
       unitHoldsBackup = true;
       return saved;
     },
-    async loadMemoryImage(image, { protectOn = false } = {}) {
-      const saved = backup();
-      if (!saved) throw noBackup();
-      const changes = memoryImageDifferences(saved.image, image).length;
-      const confirmed = await operator.confirm(
-        `Load a Memory Image into the unit? It changes ${changes} of ${MEMORY_COUNT} Memories. ` +
+    loadMemoryImage: (image, { protectOn = false } = {}) =>
+      writeMemories({
+        question: (saved) =>
+          `Load a Memory Image into the unit? It changes ${memoryImageDifferences(saved.image, image).length} of ${MEMORY_COUNT} Memories. ` +
           `The backup to restore from is ${saved.syxFile}.`,
-      );
-      if (settings.signal?.aborted) throw new ProbeStopped();
-      if (!confirmed) throw new MemoryWriteRefused('The maintainer declined the Memory Image load, so nothing was written.');
-      if (protectOn) protectMayBeOn = true;
-      await operator.instruct(protectOn ? PROTECT_ON_INSTRUCTION : PROTECT_OFF_INSTRUCTION);
-
-      // Checked here so a stop during the prompt sends nothing: `exchange` sends synchronously from here on.
-      if (settings.signal?.aborted) throw new ProbeStopped();
-      unitHoldsBackup = false;
-      const reply = await exchange(memoryImageSyx(wireChannel, image), isAdaSysEx, settings.timeoutMs, settings.signal);
-      return reply ? { reply, findings: [`The unit answered the Memory Image load with ${hexBytes(reply.bytes)}.`] } : { findings: [] };
-    },
+        label: 'the Memory Image load',
+        message: memoryImageSyx(wireChannel, image),
+        protectOn,
+      }),
+    writeProgramToAddress: (address, program) =>
+      writeMemories({
+        question: (saved) =>
+          `Send a Program with command 09 to address ${hex(address)}? It may overwrite one Memory. ` +
+          `The backup to restore from is ${saved.syxFile}.`,
+        label: `the write to address ${hex(address)}`,
+        message: addressedProgramWrite(wireChannel, address, program),
+      }),
   };
+
+  /**
+   * Refuses without a backup; otherwise asks the maintainer to confirm, then for Protect OFF
+   * (or ON), then sends `message` and waits the reply timeout for any answer. `label` names
+   * the write in evidence.
+   */
+  async function writeMemories({ question, label, message, protectOn = false }: MemoryWrite): Promise<MemoryWriteAnswer> {
+    const saved = backup();
+    if (!saved) throw noBackup();
+    const confirmed = await operator.confirm(question(saved));
+    if (settings.signal?.aborted) throw new ProbeStopped();
+    if (!confirmed) throw new MemoryWriteRefused(`The maintainer declined ${label}, so nothing was written.`);
+    if (protectOn) protectMayBeOn = true;
+    await operator.instruct(protectOn ? PROTECT_ON_INSTRUCTION : PROTECT_OFF_INSTRUCTION);
+
+    // Checked here so a stop during the prompt sends nothing: `exchange` sends synchronously from here on.
+    if (settings.signal?.aborted) throw new ProbeStopped();
+    unitHoldsBackup = false;
+    const reply = await exchange(message, isAdaSysEx, settings.timeoutMs, settings.signal);
+    return reply ? { reply, findings: [`The unit answered ${label} with ${hexBytes(reply.bytes)}.`] } : { findings: [] };
+  }
 
   /**
    * Loads the backup and checks it with a dump, first asking for Protect OFF when the probe

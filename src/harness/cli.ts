@@ -22,6 +22,7 @@ import {
 } from './probe-runner.js';
 import { channelModesProbe } from './probes/channel-modes.js';
 import { connectivityProbe } from './probes/connectivity.js';
+import { directMemoryWriteProbe } from './probes/direct-memory-write.js';
 import { documentedCommandsProbe } from './probes/documented-commands.js';
 import { frontPanelLockoutProbe } from './probes/front-panel-lockout.js';
 import { memoryImageDumpProbe } from './probes/memory-image-dump.js';
@@ -42,6 +43,7 @@ const PROBES: readonly Probe<unknown>[] = [
   voicingMasterGainProbe,
   memoryImageLoadProbe,
   protectOnLoadProbe,
+  directMemoryWriteProbe,
   channelModesProbe,
   frontPanelLockoutProbe,
   programChangeOutProbe,
@@ -89,6 +91,9 @@ Probes:
   protect-on-load       guided: set Protect ON; the harness loads the rotated backup, dumps it back and records
                         whether the unit stayed silent, answered, or wrote some Memories anyway
                         (writes Memories if the unit ignores Protect; then asks for Protect OFF and loads the backup back)
+  direct-memory-write   send a Program with command 09 addressed to Memory 2, as 0-based (01) then 1-based (02),
+                        and dump after each to see which Memory changed, then read the Working Register
+                        (may write Memories; restores the Program that was sounding, then loads the backup back)
   channel-modes         guided: set the unit's MIDI channel to ALL, then OFF, then back to the session's channel;
                         each time the harness checks which channels the unit answers SysEx on
   front-panel-lockout   guided: start a front-panel edit; the harness checks whether the unit still answers,

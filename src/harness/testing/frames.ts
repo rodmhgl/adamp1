@@ -17,7 +17,12 @@ export function workingRegisterRequest(wireChannel: number): number[] {
 
 /** Command 09 addressed to 7F: a Program for the Working Register, sent either way. */
 export function workingRegisterProgram(wireChannel: number, values: readonly number[]): number[] {
-  return frame(wireChannel, 0x09, [0x7f, ...values]);
+  return addressedProgram(wireChannel, 0x7f, values);
+}
+
+/** Command 09 addressed to `address`, e.g. a Memory instead of the Working Register. */
+export function addressedProgram(wireChannel: number, address: number, values: readonly number[]): number[] {
+  return frame(wireChannel, 0x09, [address, ...values]);
 }
 
 /** Command 0A: request the Memory Image. */
