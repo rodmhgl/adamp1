@@ -146,7 +146,7 @@ export interface ProbeContext {
    * `loadMemoryImage` for a series of loads, such as timing them: asks the maintainer once
    * to confirm up to `count` loads, showing the most Memories any of `images` changes against
    * the backup, then to set Protect OFF. Resolves with a loader for those images only, which
-   * throws once `count` loads are spent. Refuses as `loadMemoryImage` does.
+   * throws once `count` loads are spent. Refuses as `loadMemoryImage` does. See ADR 0003.
    */
   beginMemoryImageLoads(images: readonly MemoryImage[], count: number): Promise<MemoryImageLoader>;
   /**
