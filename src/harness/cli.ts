@@ -2,7 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { parseMemoryImageSyx } from '../core/memory-image.js';
-import type { NamedRawValue } from '../core/program.js';
+import { PARAMETER_NAMES, type NamedRawValue } from '../core/program.js';
+import { FileCalibrationStore } from './calibration-store.js';
 import {
   chooseConnection,
   defaultSettingsFile,
@@ -22,6 +23,7 @@ import {
 } from './probe-runner.js';
 import { channelModesProbe } from './probes/channel-modes.js';
 import { connectivityProbe } from './probes/connectivity.js';
+import { displayValueCalibrationProbe, type CalibrationTable } from './probes/display-value-calibration.js';
 import { directMemoryWriteProbe } from './probes/direct-memory-write.js';
 import { documentedCommandsProbe } from './probes/documented-commands.js';
 import { frontPanelLockoutProbe } from './probes/front-panel-lockout.js';
@@ -59,16 +61,30 @@ const PRINT_DATA: Record<string, (data: unknown) => void> = {
     console.log('Working Register (raw values):');
     for (const { name, raw } of data as NamedRawValue[]) console.log(`  ${name.padEnd(14)} ${raw}`);
   },
+  'display-value-calibration'(data) {
+    const { parameter, rows } = data as CalibrationTable;
+    console.log();
+    console.log(`${parameter}: raw value → Display Value (! where the LED disagrees with the manual)`);
+    console.log();
+    console.log('| Raw | LED | Manual | Read back | |');
+    console.log('|----:|-----|--------|----------:|-|');
+    for (const { raw, displayValue, manual, readBack, agrees, outOfRange } of rows) {
+      const note = [agrees === false ? '!' : '', outOfRange ? 'out of range' : ''].filter(Boolean).join(' ');
+      console.log(`| ${raw} | ${displayValue ?? '(skipped)'} | ${manual ?? '—'} | ${readBack ?? '—'} | ${note} |`);
+    }
+  },
 };
 
 const DEFAULT_TIMEOUT_MS = 3000;
 const DEFAULT_PACING_CHUNKS = 'whole,256,64';
 const DEFAULT_PACING_DELAYS = '0,10,50';
 const DEFAULT_PACING_REPEATS = '3';
+const DEFAULT_CALIBRATION_FILE = 'harness-sessions/calibration.json';
 
 const USAGE = `Usage: npm run harness -- [--probe <name> | --all] [--in <input port> --out <output port> --channel <1-16>]
                            [--timeout <ms>] [--dump-timeout <ms>] [--sessions-dir <folder>]
                            [--pacing-chunks <bytes,…>] [--pacing-delays <ms,…>] [--pacing-repeats <n>]
+       npm run harness -- --calibrate <parameter> [--calibration-file <file.json>] [--in … --out … --channel …]
        npm run harness -- --restore <file.syx> [--in … --out … --channel …]
        npm run harness -- --list-ports
 
@@ -112,6 +128,14 @@ Probes:
   program-change-out    guided: select a Memory on the front panel; the harness records any Program Change sent
   program-change-in     guided: the harness sends a Program Change and finds which Memory it loaded, from the display
                         and the Working Register (replaces the Working Register; asks first)
+  --calibrate <parameter>
+                        guided Display Value calibration of one parameter: overdrive-1, overdrive-2, master-gain,
+                        bass, midrange, treble, presence, effects-loop, chorus-depth, chorus-rate or voicing. It
+                        sets it to each raw value in turn through the Working Register and asks what the LED shows;
+                        s skips a value, r sets it again, b goes back, and any entry can be redone at the end.
+                        Entries are saved to --calibration-file (default ${DEFAULT_CALIBRATION_FILE}) as you go, so an
+                        interrupted calibration resumes where it stopped. Prints raw value → Display Value, marking
+                        each disagreement with the manual (restores the Program that was sounding afterwards)
   --restore <file.syx>  load a saved Memory Image (e.g. a session's memory-image-<n>.syx) and check it with a dump
   --all                 run every non-destructive probe (connectivity and memory-image-dump:
                         the others change the Working Register or need you at the front panel)`;
@@ -126,6 +150,8 @@ async function main(): Promise<number> {
       'dump-timeout': { type: 'string' },
       probe: { type: 'string' },
       restore: { type: 'string' },
+      calibrate: { type: 'string' },
+      'calibration-file': { type: 'string', default: DEFAULT_CALIBRATION_FILE },
       all: { type: 'boolean' },
       'pacing-chunks': { type: 'string', default: DEFAULT_PACING_CHUNKS },
       'pacing-delays': { type: 'string', default: DEFAULT_PACING_DELAYS },
@@ -140,12 +166,20 @@ async function main(): Promise<number> {
     console.log(USAGE);
     return 0;
   }
-  if ([values.all, values.probe, values.restore].filter((value) => value !== undefined).length > 1) {
-    console.error(`Use one of --probe, --all and --restore.\n\n${USAGE}`);
+  if ([values.all, values.probe, values.restore, values.calibrate].filter((value) => value !== undefined).length > 1) {
+    console.error(`Use one of --probe, --all, --restore and --calibrate.\n\n${USAGE}`);
     return 2;
   }
   let probes: Probe<unknown>[];
-  if (values.restore !== undefined) {
+  if (values.calibrate !== undefined) {
+    const wanted = kebab(values.calibrate);
+    const parameter = PARAMETER_NAMES.find((name) => kebab(name) === wanted);
+    if (!parameter) {
+      console.error(`Unknown parameter "${values.calibrate}". Calibrate one of: ${PARAMETER_NAMES.map(kebab).join(', ')}.`);
+      return 2;
+    }
+    probes = [displayValueCalibrationProbe(parameter, new FileCalibrationStore(values['calibration-file']))];
+  } else if (values.restore !== undefined) {
     let bytes: Buffer;
     try {
       bytes = await readFile(values.restore);
@@ -271,6 +305,11 @@ function readPacingOptions(chunks: string, delays: string, repeats: string): Loa
   const count = Number(repeats);
   if (!Number.isInteger(count) || count < 1) return `--pacing-repeats must be a whole number of 1 or more, got "${repeats}".`;
   return { chunkSizes, delaysMs, repeats: count };
+}
+
+/** "Master Gain" → "master-gain", as typed on the command line. */
+function kebab(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, '-');
 }
 
 function printReport(report: ProbeReport<unknown>): void {

@@ -1,5 +1,5 @@
 import type { MidiMessage, MidiPort } from '../../core/midi-port.js';
-import { memoryImage } from './frames.js';
+import { memoryImage, workingRegisterProgram } from './frames.js';
 
 /** One piece of a message as the interface passes it on. */
 export interface Chunk {
@@ -11,8 +11,12 @@ export interface Chunk {
 }
 
 export interface SimulatedUnitOptions {
-  /** The Memory Image the unit holds: 128 Programs of 11 values. */
-  image: number[][];
+  /** The Memory Image the unit holds: 128 Programs of 11 values. Defaults to all zeros. */
+  image?: number[][];
+  /** The Program sounding in the Working Register: 11 values. Defaults to all zeros. */
+  workingRegister?: number[];
+  /** What the unit makes of a Program written to the Working Register, e.g. clamping a value. Defaults to taking it as sent. */
+  applies?(program: number[]): number[];
   /** 0-based. Defaults to 0. */
   wireChannel?: number;
   /** Whether the USB-MIDI interface loses a chunk. Defaults to never. */
@@ -25,7 +29,9 @@ const PROGRAM_LENGTH = 11;
  * A fake unit behind a fake USB-MIDI interface, for probes that send the same message in
  * chunks. It reassembles SysEx from whatever chunks the interface doesn't drop, answers a
  * Memory Image request (0A) with a dump of what it holds, and takes a Memory Image load
- * (0B) only when the frame arrives whole, with a matching checksum; anything else it ignores.
+ * (0B) only when the frame arrives whole, with a matching checksum. It answers a Working
+ * Register request (08) with the Program it holds and takes a Program addressed to 7F (09);
+ * anything else it ignores.
  * The checks are worked out here, independently of the codec, as in frames.ts.
  */
 export class SimulatedUnitPort implements MidiPort {
@@ -34,14 +40,24 @@ export class SimulatedUnitPort implements MidiPort {
   /** How many Memory Image loads the unit took. */
   loads = 0;
   image: number[][];
+  workingRegister: number[];
+  private readonly applies: (program: number[]) => number[];
   private readonly wireChannel: number;
   private readonly drops: (chunk: Chunk) => boolean;
   private readonly listeners = new Set<(message: MidiMessage) => void>();
   private incoming: number[] | undefined;
   private lastSentAt = -Infinity;
 
-  constructor({ image, wireChannel = 0, drops = () => false }: SimulatedUnitOptions) {
+  constructor({
+    image = Array.from({ length: 128 }, () => Array<number>(PROGRAM_LENGTH).fill(0)),
+    workingRegister = Array<number>(PROGRAM_LENGTH).fill(0),
+    applies = (program) => program,
+    wireChannel = 0,
+    drops = () => false,
+  }: SimulatedUnitOptions = {}) {
     this.image = image;
+    this.workingRegister = workingRegister;
+    this.applies = applies;
     this.wireChannel = wireChannel;
     this.drops = drops;
   }
@@ -80,6 +96,11 @@ export class SimulatedUnitPort implements MidiPort {
     if (command === 0x0a && payload.length === 0) {
       const dump = memoryImage(this.wireChannel, this.image);
       queueMicrotask(() => this.deliver(dump));
+    } else if (command === 0x08 && payload.length === 0) {
+      const reply = workingRegisterProgram(this.wireChannel, this.workingRegister);
+      queueMicrotask(() => this.deliver(reply));
+    } else if (command === 0x09 && payload[0] === 0x7f && payload.length === 1 + PROGRAM_LENGTH) {
+      this.workingRegister = this.applies(payload.slice(1));
     } else if (command === 0x0b && payload.length === 128 * PROGRAM_LENGTH) {
       this.image = Array.from({ length: 128 }, (_, i) => payload.slice(i * PROGRAM_LENGTH, (i + 1) * PROGRAM_LENGTH));
       this.loads++;
