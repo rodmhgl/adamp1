@@ -90,6 +90,15 @@ export interface MemoryImageLoadOptions {
   protectOn?: boolean;
 }
 
+/** How a message is sent: in chunks of `chunkBytes`, `delayMs` apart. A chunk as long as the message sends it whole. */
+export interface Pacing {
+  chunkBytes: number;
+  delayMs: number;
+}
+
+/** Loads one of the Memory Images a series was confirmed for, sent as `pacing` says (default: whole). */
+export type MemoryImageLoader = (image: MemoryImage, pacing?: Pacing) => Promise<MemoryWriteAnswer>;
+
 /** What came back from a write to Memories. */
 export interface MemoryWriteAnswer {
   /** The first ADA SysEx the unit sent within the reply timeout, if any. */
@@ -134,6 +143,13 @@ export interface ProbeContext {
    */
   loadMemoryImage(image: MemoryImage, options?: MemoryImageLoadOptions): Promise<MemoryWriteAnswer>;
   /**
+   * `loadMemoryImage` for a series of loads, such as timing them: asks the maintainer once
+   * to confirm up to `count` loads, showing the most Memories any of `images` changes against
+   * the backup, then to set Protect OFF. Resolves with a loader for those images only, which
+   * throws once `count` loads are spent. Refuses as `loadMemoryImage` does.
+   */
+  beginMemoryImageLoads(images: readonly MemoryImage[], count: number): Promise<MemoryImageLoader>;
+  /**
    * The other way to write Memories, for finding out whether one Memory can be written
    * directly. Asks the maintainer to confirm, then to set Protect OFF, then sends `program`
    * with command 09 addressed to `address` instead of the Working Register (7F), and waits
@@ -156,7 +172,6 @@ interface MemoryWrite {
   /** What the maintainer confirms, given the backup that will be restored. */
   question(saved: VerifiedBackup): string;
   label: string;
-  message: Uint8Array;
   protectOn?: boolean;
 }
 
@@ -204,42 +219,77 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
   let unitHoldsBackup = true;
   /** Set once the maintainer was asked for Protect ON, so the restore asks for Protect OFF first. */
   let protectMayBeOn = false;
+  /** The latest Memory Image load sent, so a dump that reads it back shows its pacing works. */
+  let lastLoad: { image: MemoryImage; pacing?: Pacing } | undefined;
+  /** How the latest load that read back as loaded was sent; the restore is sent the same way. */
+  let restorePacing: Pacing | undefined;
 
-  function exchange(
+  /**
+   * Sends `request`, in chunks when `pacing` says so, and resolves with the first received
+   * message `accept` matches, or `undefined` when none arrives within `timeoutMs` of the
+   * last chunk. A stop while chunks are still going out waits for the last one, so the
+   * unit never sees a message cut off part-way.
+   */
+  async function exchange(
     request: Uint8Array,
     accept: (bytes: Uint8Array) => boolean,
     timeoutMs: number,
     signal?: AbortSignal,
+    pacing?: Pacing,
   ): Promise<MidiMessage | undefined> {
-    return new Promise((resolve, reject) => {
-      if (signal?.aborted) return reject(new ProbeStopped());
-      const timer = setTimeout(() => finish(undefined), timeoutMs);
-      const stopListening = settings.port.onMessage((message) => {
-        if (!sameBytes(message.bytes, request) && accept(message.bytes)) finish(message);
-      });
-      const onAbort = () => {
-        cleanUp();
-        reject(new ProbeStopped());
-      };
-      signal?.addEventListener('abort', onAbort, { once: true });
-      function cleanUp() {
-        clearTimeout(timer);
-        stopListening();
-        signal?.removeEventListener('abort', onAbort);
-      }
-      function finish(message: MidiMessage | undefined) {
-        cleanUp();
-        resolve(message);
-      }
-      traffic.push({ direction: 'sent', bytes: [...request], timestamp: performance.now() });
-      settings.port.send(request);
+    if (signal?.aborted) throw new ProbeStopped();
+    let reply: MidiMessage | undefined;
+    let onReply = () => {};
+    const stopListening = settings.port.onMessage((message) => {
+      if (reply || sameBytes(message.bytes, request) || !accept(message.bytes)) return;
+      reply = message;
+      onReply();
     });
+    try {
+      await send(request, pacing);
+      return await new Promise((resolve, reject) => {
+        if (reply) return resolve(reply);
+        if (signal?.aborted) return reject(new ProbeStopped());
+        const timer = setTimeout(() => finish(undefined), timeoutMs);
+        const onAbort = () => {
+          cleanUp();
+          reject(new ProbeStopped());
+        };
+        signal?.addEventListener('abort', onAbort, { once: true });
+        onReply = () => finish(reply);
+        function cleanUp() {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', onAbort);
+        }
+        function finish(message: MidiMessage | undefined) {
+          cleanUp();
+          resolve(message);
+        }
+      });
+    } finally {
+      stopListening();
+    }
+  }
+
+  /** Sends `message` whole and synchronously, or in chunks with `pacing`. */
+  async function send(message: Uint8Array, pacing?: Pacing): Promise<void> {
+    if (pacing && !(Number.isInteger(pacing.chunkBytes) && pacing.chunkBytes > 0)) {
+      throw new Error(`Chunks must be a positive whole number of bytes, not ${pacing.chunkBytes}.`);
+    }
+    const chunkBytes = pacing?.chunkBytes ?? message.length;
+    for (let start = 0; start < message.length; start += chunkBytes) {
+      if (start > 0 && pacing!.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, pacing!.delayMs));
+      const chunk = message.subarray(start, start + chunkBytes);
+      traffic.push({ direction: 'sent', bytes: [...chunk], timestamp: performance.now() });
+      settings.port.send(chunk);
+    }
   }
 
   async function readMemoryImage(signal?: AbortSignal): Promise<MemoryImageRead> {
     const read = await requestMemoryImage((request, accept, timeoutMs) => exchange(request, accept, timeoutMs, signal), wireChannel, dumpTimeoutMs);
     const saved = backup();
     if (read.ok && saved && memoryImageDifferences(saved.image, read.image).length === 0) unitHoldsBackup = true;
+    if (read.ok && lastLoad && memoryImageDifferences(lastLoad.image, read.image).length === 0) restorePacing = lastLoad.pacing;
     return read;
   }
 
@@ -271,31 +321,52 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
       unitHoldsBackup = true;
       return saved;
     },
-    loadMemoryImage: (image, { protectOn = false } = {}) =>
-      writeMemories({
-        question: (saved) =>
-          `Load a Memory Image into the unit? It changes ${memoryImageDifferences(saved.image, image).length} of ${MEMORY_COUNT} Memories. ` +
-          `The backup to restore from is ${saved.syxFile}.`,
-        label: 'the Memory Image load',
-        message: memoryImageSyx(wireChannel, image),
-        protectOn,
-      }),
-    writeProgramToAddress: (address, program) =>
-      writeMemories({
+    async loadMemoryImage(image, { protectOn = false } = {}) {
+      const load = await beginMemoryImageLoads([image], 1, protectOn);
+      return load(image);
+    },
+    beginMemoryImageLoads: (images, count) => beginMemoryImageLoads(images, count),
+    async writeProgramToAddress(address, program) {
+      const label = `the write to address ${hex(address)}`;
+      await confirmMemoryWrites({
         question: (saved) =>
           `Send a Program with command 09 to address ${hex(address)}? It may overwrite one Memory. ` +
           `The backup to restore from is ${saved.syxFile}.`,
-        label: `the write to address ${hex(address)}`,
-        message: addressedProgramWrite(wireChannel, address, program),
-      }),
+        label,
+      });
+      return sendMemoryWrite(addressedProgramWrite(wireChannel, address, program), label);
+    },
   };
+
+  async function beginMemoryImageLoads(images: readonly MemoryImage[], count: number, protectOn = false): Promise<MemoryImageLoader> {
+    if (images.length === 0) throw new Error('A series of Memory Image loads needs at least one Memory Image.');
+    const label = count === 1 ? 'the Memory Image load' : 'the Memory Image loads';
+    await confirmMemoryWrites({
+      question(saved) {
+        const changes = Math.max(...images.map((image) => memoryImageDifferences(saved.image, image).length));
+        const loads = count === 1 ? `Load a Memory Image into the unit? It changes` : `Load Memory Images into the unit up to ${count} times? Each load changes up to`;
+        return `${loads} ${changes} of ${MEMORY_COUNT} Memories. The backup to restore from is ${saved.syxFile}.`;
+      },
+      label,
+      protectOn,
+    });
+    let loadsLeft = count;
+    return (image, pacing) => {
+      if (loadsLeft === 0) throw new Error(`Only ${count} Memory Image loads were confirmed.`);
+      if (!images.some((confirmed) => memoryImageDifferences(confirmed, image).length === 0)) {
+        throw new Error('Only the Memory Images confirmed for this series can be loaded.');
+      }
+      loadsLeft--;
+      lastLoad = { image, ...(pacing && { pacing }) };
+      return sendMemoryWrite(memoryImageSyx(wireChannel, image), label, pacing);
+    };
+  }
 
   /**
    * Refuses without a backup; otherwise asks the maintainer to confirm, then for Protect OFF
-   * (or ON), then sends `message` and waits the reply timeout for any answer. `label` names
-   * the write in evidence.
+   * (or ON). `label` names the write in evidence.
    */
-  async function writeMemories({ question, label, message, protectOn = false }: MemoryWrite): Promise<MemoryWriteAnswer> {
+  async function confirmMemoryWrites({ question, label, protectOn = false }: MemoryWrite): Promise<void> {
     const saved = backup();
     if (!saved) throw noBackup();
     const confirmed = await operator.confirm(question(saved));
@@ -303,17 +374,22 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
     if (!confirmed) throw new MemoryWriteRefused(`The maintainer declined ${label}, so nothing was written.`);
     if (protectOn) protectMayBeOn = true;
     await operator.instruct(protectOn ? PROTECT_ON_INSTRUCTION : PROTECT_OFF_INSTRUCTION);
+  }
 
-    // Checked here so a stop during the prompt sends nothing: `exchange` sends synchronously from here on.
+  /** Sends a confirmed write to Memories and waits the reply timeout for any answer. */
+  async function sendMemoryWrite(message: Uint8Array, label: string, pacing?: Pacing): Promise<MemoryWriteAnswer> {
+    // Checked here so a stop during the prompt sends nothing. From here on `exchange` sends: a stop
+    // while paced chunks are going out takes effect after the last one.
     if (settings.signal?.aborted) throw new ProbeStopped();
     unitHoldsBackup = false;
-    const reply = await exchange(message, isAdaSysEx, settings.timeoutMs, settings.signal);
+    const reply = await exchange(message, isAdaSysEx, settings.timeoutMs, settings.signal, pacing);
     return reply ? { reply, findings: [`The unit answered ${label} with ${hexBytes(reply.bytes)}.`] } : { findings: [] };
   }
 
   /**
-   * Loads the backup and checks it with a dump, first asking for Protect OFF when the probe
-   * asked for Protect ON. Not stoppable: it is what a stop falls back on, so it sends the
+   * Loads the backup and checks it with a dump, first asking for Protect OFF when the probe asked
+   * for Protect ON. It is sent as the latest load that read back correctly was (whole if none
+   * did), so a probe that found whole loads unreliable is restored in chunks. Not stoppable: it is what a stop falls back on, so it sends the
    * backup even when the maintainer can no longer be asked.
    */
   async function restoreBackup(saved: VerifiedBackup): Promise<string[]> {
@@ -331,7 +407,7 @@ export async function runProbe<T>(probe: Probe<T>, settings: SessionSettings): P
 
   async function sendBackup(saved: VerifiedBackup, retry: string): Promise<string[]> {
     try {
-      await exchange(memoryImageSyx(wireChannel, saved.image), isAdaSysEx, settings.timeoutMs);
+      await exchange(memoryImageSyx(wireChannel, saved.image), isAdaSysEx, settings.timeoutMs, undefined, restorePacing);
       const read = await readMemoryImage();
       if (!read.ok) return [`WARNING: the restore of the backup could not be checked (${describeFailedRead(read)}); ${retry}.`];
       const differences = memoryImageDifferences(saved.image, read.image).length;

@@ -25,6 +25,7 @@ import { connectivityProbe } from './probes/connectivity.js';
 import { directMemoryWriteProbe } from './probes/direct-memory-write.js';
 import { documentedCommandsProbe } from './probes/documented-commands.js';
 import { frontPanelLockoutProbe } from './probes/front-panel-lockout.js';
+import { loadPacingProbe, type LoadPacingOptions } from './probes/load-pacing.js';
 import { memoryImageDumpProbe } from './probes/memory-image-dump.js';
 import { memoryImageLoadProbe } from './probes/memory-image-load.js';
 import { protectOnLoadProbe } from './probes/protect-on-load.js';
@@ -35,7 +36,7 @@ import { voicingMasterGainProbe } from './probes/voicing-master-gain.js';
 import { workingRegisterWriteProbe } from './probes/working-register-write.js';
 import { runSession } from './session.js';
 
-const PROBES: readonly Probe<unknown>[] = [
+const probesFor = (pacing: LoadPacingOptions): readonly Probe<unknown>[] => [
   connectivityProbe,
   memoryImageDumpProbe,
   documentedCommandsProbe,
@@ -44,6 +45,7 @@ const PROBES: readonly Probe<unknown>[] = [
   memoryImageLoadProbe,
   protectOnLoadProbe,
   directMemoryWriteProbe,
+  loadPacingProbe(pacing),
   channelModesProbe,
   frontPanelLockoutProbe,
   programChangeOutProbe,
@@ -60,9 +62,13 @@ const PRINT_DATA: Record<string, (data: unknown) => void> = {
 };
 
 const DEFAULT_TIMEOUT_MS = 3000;
+const DEFAULT_PACING_CHUNKS = 'whole,256,64';
+const DEFAULT_PACING_DELAYS = '0,10,50';
+const DEFAULT_PACING_REPEATS = '3';
 
 const USAGE = `Usage: npm run harness -- [--probe <name> | --all] [--in <input port> --out <output port> --channel <1-16>]
                            [--timeout <ms>] [--dump-timeout <ms>] [--sessions-dir <folder>]
+                           [--pacing-chunks <bytes,…>] [--pacing-delays <ms,…>] [--pacing-repeats <n>]
        npm run harness -- --restore <file.syx> [--in … --out … --channel …]
        npm run harness -- --list-ports
 
@@ -94,6 +100,11 @@ Probes:
   direct-memory-write   send a Program with command 09 addressed to Memory 2, as 0-based (01) then 1-based (02),
                         and dump after each to see which Memory changed, then read the Working Register
                         (may write Memories; restores the Program that was sounding, then loads the backup back)
+  load-pacing           load Memory Images in chunks of each --pacing-chunks size (bytes, or "whole"; default
+                        ${DEFAULT_PACING_CHUNKS}) with each --pacing-delays pause between chunks (ms; default ${DEFAULT_PACING_DELAYS}),
+                        --pacing-repeats times each (default ${DEFAULT_PACING_REPEATS}), dumping after every load; reports each
+                        setting's success rate and the fastest that never failed
+                        (writes Memories; loads the backup back afterwards)
   channel-modes         guided: set the unit's MIDI channel to ALL, then OFF, then back to the session's channel;
                         each time the harness checks which channels the unit answers SysEx on
   front-panel-lockout   guided: start a front-panel edit; the harness checks whether the unit still answers,
@@ -116,6 +127,9 @@ async function main(): Promise<number> {
       probe: { type: 'string' },
       restore: { type: 'string' },
       all: { type: 'boolean' },
+      'pacing-chunks': { type: 'string', default: DEFAULT_PACING_CHUNKS },
+      'pacing-delays': { type: 'string', default: DEFAULT_PACING_DELAYS },
+      'pacing-repeats': { type: 'string', default: DEFAULT_PACING_REPEATS },
       'sessions-dir': { type: 'string', default: 'harness-sessions' },
       'list-ports': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
@@ -146,9 +160,14 @@ async function main(): Promise<number> {
     }
     probes = [restoreProbe(values.restore, parsed.image)];
   } else {
+    const pacing = readPacingOptions(values['pacing-chunks'], values['pacing-delays'], values['pacing-repeats']);
+    if (typeof pacing === 'string') {
+      console.error(pacing);
+      return 2;
+    }
     const selection: ProbeSelection = values.all ? { allNonDestructive: true } : (values.probe ?? 'connectivity');
     try {
-      probes = selectProbes(PROBES, selection);
+      probes = selectProbes(probesFor(pacing), selection);
     } catch (error) {
       console.error(`${(error as Error).message}\n\n${USAGE}`);
       return 2;
@@ -236,6 +255,22 @@ async function main(): Promise<number> {
   } finally {
     await midi.close();
   }
+}
+
+/** The load-pacing settings, or what's wrong with them. */
+function readPacingOptions(chunks: string, delays: string, repeats: string): LoadPacingOptions | string {
+  const list = (value: string) => value.split(',').map((entry) => entry.trim());
+  const chunkSizes = list(chunks).map((size) => (size === 'whole' ? 'whole' : size === '' ? NaN : Number(size)));
+  if (!chunkSizes.every((size) => size === 'whole' || (Number.isInteger(size) && size > 0))) {
+    return `--pacing-chunks must list positive whole numbers of bytes or "whole", got "${chunks}".`;
+  }
+  const delaysMs = list(delays).map((delay) => (delay === '' ? NaN : Number(delay)));
+  if (!delaysMs.every((delay) => Number.isFinite(delay) && delay >= 0)) {
+    return `--pacing-delays must list milliseconds of 0 or more, got "${delays}".`;
+  }
+  const count = Number(repeats);
+  if (!Number.isInteger(count) || count < 1) return `--pacing-repeats must be a whole number of 1 or more, got "${repeats}".`;
+  return { chunkSizes, delaysMs, repeats: count };
 }
 
 function printReport(report: ProbeReport<unknown>): void {
